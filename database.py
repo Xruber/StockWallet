@@ -2,6 +2,7 @@ import time
 import random
 import logging
 import uuid
+import certifi  # <--- NEW: Added certifi to fix SSL Handshake errors
 from pymongo import MongoClient
 from config import MONGO_URI
 
@@ -13,7 +14,8 @@ tokens_collection = None
 transactions_collection = None 
 
 try:
-    client = MongoClient(MONGO_URI)
+    # <--- NEW: Added tlsCAFile=certifi.where() to bypass the TLSV1_ALERT_INTERNAL_ERROR
+    client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
     db = client.crypto_wallet_bot_db # Using a new isolated database name
     users_collection = db.users
     tokens_collection = db.tokens             
