@@ -6,3 +6,4 @@ requests
 argon2-cffi
 aiohttp
 matplotlib
+certifi
