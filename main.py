@@ -1,8 +1,9 @@
 import logging
+import traceback
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ConversationHandler
 
-from config import BOT_TOKEN, ADMIN_ID, MONGO_URI
+from config import BOT_TOKEN, ADMIN_ID
 from database import get_user_data
 
 from handlers_wallet import (
@@ -100,4 +101,16 @@ def main():
     app.run_polling()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        error_msg = traceback.format_exc()
+        print("\n================================================")
+        print("🚨 CRASH DETECTED! HERE IS THE EXACT ERROR: 🚨")
+        print("================================================\n")
+        print(error_msg)
+        print("\n================================================")
+        
+        # Save to file just in case console cuts it off
+        with open("crash_log.txt", "w") as f:
+            f.write(error_msg)
