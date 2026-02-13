@@ -2,7 +2,9 @@ import time
 import random
 import logging
 import uuid
-import certifi  # <--- NEW: Added certifi to fix SSL Handshake errors
+import string
+from datetime import date
+import certifi
 from pymongo import MongoClient
 from config import MONGO_URI
 
@@ -12,21 +14,47 @@ logger = logging.getLogger(__name__)
 users_collection = None 
 tokens_collection = None       
 transactions_collection = None 
+gift_codes_collection = None
+stats_collection = None
 
 try:
-    # <--- NEW: Added tlsCAFile=certifi.where() to bypass the TLSV1_ALERT_INTERNAL_ERROR
     client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
-    db = client.crypto_wallet_bot_db # Using a new isolated database name
+    db = client.crypto_wallet_bot_db 
     users_collection = db.users
     tokens_collection = db.tokens             
     transactions_collection = db.transactions 
+    gift_codes_collection = db.gift_codes
+    stats_collection = db.daily_stats
     logger.info("✅ Successfully connected to Wallet Database.")
 except Exception as e:
     logger.error(f"❌ Failed to connect to MongoDB: {e}")
 
 # ==========================================
-# 1. USER MANAGEMENT
+# 1. USER & STATS MANAGEMENT
 # ==========================================
+def get_today_str():
+    return date.today().isoformat()
+
+def record_new_user():
+    if stats_collection is None: return
+    today = get_today_str()
+    stats_collection.update_one({"date": today}, {"$inc": {"new_users": 1}}, upsert=True)
+
+def record_first_deposit(user_id):
+    if users_collection is None or stats_collection is None: return
+    user = users_collection.find_one({"user_id": user_id})
+    if user and not user.get("has_deposited", False):
+        users_collection.update_one({"user_id": user_id}, {"$set": {"has_deposited": True}})
+        today = get_today_str()
+        stats_collection.update_one({"date": today}, {"$inc": {"first_deposits": 1}}, upsert=True)
+
+def get_daily_stats():
+    if stats_collection is None: return {"new_users": 0, "first_deposits": 0}
+    today = get_today_str()
+    stat = stats_collection.find_one({"date": today})
+    if not stat: return {"new_users": 0, "first_deposits": 0}
+    return {"new_users": stat.get("new_users", 0), "first_deposits": stat.get("first_deposits", 0)}
+
 def get_user_data(user_id):
     if users_collection is None: return {}
     
@@ -35,9 +63,11 @@ def get_user_data(user_id):
         user = {
             "user_id": user_id,
             "is_banned": False,
+            "has_deposited": False,
             "wallet": {"balance": 0.0, "holdings": {}, "invested_amt": {}} 
         }
         users_collection.insert_one(user)
+        record_new_user()
         
     if "wallet" not in user:
         user["wallet"] = {"balance": 0.0, "holdings": {}, "invested_amt": {}}
@@ -46,7 +76,7 @@ def get_user_data(user_id):
     return user
 
 # ==========================================
-# 2. TOKEN & CHART SYSTEM
+# 2. TOKEN & CHART SYSTEM (NEW MOMENTUM LOGIC)
 # ==========================================
 INITIAL_TOKENS = [
     {"symbol": "TET", "name": "Texhet", "price": 10.0, "history": [10.0]},
@@ -72,22 +102,39 @@ def init_tokens():
 
 def get_all_tokens():
     if tokens_collection is None: return []
-    tokens = list(tokens_collection.find({}, {"_id": 0}))
+    # No more random updates here. This just fetches the current state.
+    return list(tokens_collection.find({}, {"_id": 0}))
+
+def update_market_prices():
+    """ Runs every 5 mins to update prices using Trend & Volatility momentum """
+    if tokens_collection is None: return
+    tokens = list(tokens_collection.find({}))
     
-    # Market Fluctuation Logic
     for t in tokens:
-        if random.random() > 0.6: 
-            change = random.uniform(0.95, 1.05)
-            new_price = round(t['price'] * change, 2)
-            tokens_collection.update_one(
-                {"symbol": t['symbol']}, 
-                {
-                    "$set": {"price": new_price},
-                    "$push": {"history": {"$each": [new_price], "$slice": -20}}
-                }
-            )
-            t['price'] = new_price 
-    return tokens
+        # Initialize trend/volatility if they don't exist
+        trend = t.get('trend', random.uniform(-0.02, 0.02))
+        volatility = t.get('volatility', random.uniform(0.01, 0.05))
+        
+        # Calculate price change based on trend + random noise from volatility
+        change_percent = trend + random.uniform(-volatility, volatility)
+        
+        # Cap the max movement per 5 mins to 12% to prevent instant crashes
+        change_percent = max(-0.12, min(0.12, change_percent))
+        
+        new_price = round(t['price'] * (1 + change_percent), 2)
+        if new_price <= 0.01: new_price = 0.01 # Prevent zero/negative
+        
+        # Evolve the trend slightly so it's not a permanent moon/crash
+        new_trend = trend + random.uniform(-0.015, 0.015)
+        new_trend = max(-0.05, min(0.05, new_trend)) # Keep trend bounded
+        
+        tokens_collection.update_one(
+            {"symbol": t['symbol']}, 
+            {
+                "$set": {"price": new_price, "trend": new_trend, "volatility": volatility},
+                "$push": {"history": {"$each": [new_price], "$slice": -20}}
+            }
+        )
 
 def get_token_details(symbol):
     if tokens_collection is None: return None
@@ -124,7 +171,7 @@ def trade_token(user_id, symbol, quantity, price, is_buy=True):
         )
 
 # ==========================================
-# 4. TRANSACTION HISTORY
+# 4. TRANSACTION & ADMIN HISTORY
 # ==========================================
 def create_transaction(user_id, tx_type, amount, method, details):
     if transactions_collection is None: return "ERROR"
@@ -142,5 +189,34 @@ def get_transaction(tx_id):
 
 def update_transaction_status(tx_id, status):
     transactions_collection.update_one({"tx_id": tx_id}, {"$set": {"status": status}})
+
+def get_token_investment_stats():
+    """ Aggregates total money invested into each token across all users """
+    if users_collection is None: return []
+    pipeline = [
+        {"$project": {"invested_amt": "$wallet.invested_amt"}},
+        {"$addFields": {"invested_array": {"$objectToArray": "$invested_amt"}}},
+        {"$unwind": "$invested_array"},
+        {"$group": {"_id": "$invested_array.k", "total_invested": {"$sum": "$invested_array.v"}}},
+        {"$sort": {"total_invested": -1}}
+    ]
+    return list(users_collection.aggregate(pipeline))
+
+# ==========================================
+# 5. GIFT CODE SYSTEM
+# ==========================================
+def generate_gift_code(amount):
+    if gift_codes_collection is None: return None
+    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
+    gift_codes_collection.insert_one({"code": code, "amount": float(amount), "used": False})
+    return code
+
+def redeem_gift_code(user_id, code):
+    if gift_codes_collection is None: return False, 0
+    gc = gift_codes_collection.find_one({"code": code, "used": False})
+    if not gc: return False, 0
+    gift_codes_collection.update_one({"code": code}, {"$set": {"used": True, "used_by": user_id}})
+    update_wallet_balance(user_id, gc["amount"])
+    return True, gc["amount"]
 
 init_tokens()
