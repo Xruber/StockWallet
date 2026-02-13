@@ -6,7 +6,9 @@ from database import (
     get_user_wallet, get_all_tokens, update_wallet_balance, 
     trade_token, create_transaction, get_user_transactions, 
     update_transaction_status, get_transaction, get_user_data,
-    update_token_price, users_collection, get_token_details
+    update_token_price, users_collection, get_token_details,
+    record_first_deposit, get_daily_stats, generate_gift_code, 
+    redeem_gift_code, get_token_investment_stats
 )
 from config import ADMIN_ID, PAYMENT_IMAGE_URL
 
@@ -315,7 +317,7 @@ async def process_withdrawal(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 # ==========================================
-# 6. ADMIN HANDLERS
+# 6. ADMIN & NEW FEATURE HANDLERS
 # ==========================================
 async def admin_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -327,7 +329,9 @@ async def admin_payment_handler(update: Update, context: ContextTypes.DEFAULT_TY
     uid, amt = tx['user_id'], tx['amount']
     if action == "dep": 
         if decision == "ok":
-            update_wallet_balance(uid, amt); update_transaction_status(tx_id, "completed")
+            update_wallet_balance(uid, amt)
+            update_transaction_status(tx_id, "completed")
+            record_first_deposit(uid) # <--- Tracks daily first deposits!
             await context.bot.send_message(uid, f"✅ Deposit ₹{amt} Approved")
         else:
             update_transaction_status(tx_id, "rejected")
@@ -352,3 +356,55 @@ async def token_rig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def token_roi_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     await update.message.reply_text("🏆 **ROI List generated in console.**")
+
+# --- NEW COMMANDS FOR GIFT CODES & STATS ---
+
+async def daily_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Removed the admin check so all users can use this command
+    stats = get_daily_stats()
+    msg = (
+        f"📊 **DAILY STATS (Today)**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👥 New Registered Members: **{stats['new_users']}**\n"
+        f"💰 First-Time Depositors: **{stats['first_deposits']}**\n"
+        f"*(Stats will automatically reset at midnight)*"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+async def gen_gift_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        amount = float(context.args[0])
+        code = generate_gift_code(amount)
+        if code:
+            await update.message.reply_text(f"🎁 **GIFT CODE GENERATED**\n\nCode: `{code}`\nValue: ₹{amount}\n\nUsers can use `/redeem <code>`", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Database error.")
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Usage: `/gen_gift AMOUNT`")
+
+async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    get_user_data(uid) # Ensure registered
+    try:
+        code = context.args[0]
+        success, amount = redeem_gift_code(uid, code)
+        if success:
+            await update.message.reply_text(f"🎉 **SUCCESS!**\nYou redeemed ₹{amount} to your wallet.")
+        else:
+            await update.message.reply_text("❌ Invalid or already used Gift Code.")
+    except IndexError:
+        await update.message.reply_text("❌ Usage: `/redeem CODE`")
+
+async def token_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    stats = get_token_investment_stats()
+    
+    if not stats:
+        return await update.message.reply_text("📊 No investments made yet.")
+        
+    msg = "🏆 **TOKEN INVESTMENT LEADERBOARD**\n━━━━━━━━━━━━━━\n"
+    for s in stats:
+        msg += f"🔹 **{s['_id']}**: ₹{s['total_invested']:.2f}\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
