@@ -8,7 +8,8 @@ from database import (
     update_transaction_status, get_transaction, get_user_data,
     update_token_price, users_collection, get_token_details,
     record_first_deposit, get_daily_stats, generate_gift_code, 
-    redeem_gift_code, get_token_investment_stats, get_token_roi_list
+    redeem_gift_code, get_current_token_stats, get_token_roi_list,
+    get_platform_profit_by_token
 )
 from config import ADMIN_ID, PAYMENT_IMAGE_URL
 
@@ -353,7 +354,6 @@ async def token_rig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Rigged. Price anchored.")
     except: await update.message.reply_text("❌ Usage: `/token_rig SYM PRICE`")
 
-# --- NOW FULLY WORKING ROI COMMAND ---
 async def token_roi_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     roi_data = get_token_roi_list()
     if not roi_data:
@@ -370,6 +370,36 @@ async def token_roi_list_command(update: Update, context: ContextTypes.DEFAULT_T
         
         msg += f"{icon} **{symbol}**: {sign}{pct:.2f}% (₹{price})\n"
         
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# --- NEW: CURRENT VALUE LOCKED COMMAND ---
+async def token_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    stats = get_current_token_stats()
+    
+    if not stats:
+        return await update.message.reply_text("📊 No tokens are currently held by users.")
+        
+    msg = "🏆 **TOKEN VALUE LOCKED (TVL)**\n*Current fiat value invested right now*\n━━━━━━━━━━━━━━\n"
+    for s in stats:
+        msg += f"🔹 **{s['symbol']}**: ₹{s['current_value']:.2f} ({int(s['total_held'])} tokens)\n"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# --- NEW: CURRENT PROFIT RANKING COMMAND ---
+async def token_profits_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    stats = get_platform_profit_by_token()
+    
+    if not stats:
+        return await update.message.reply_text("📊 No profit data available yet.")
+        
+    msg = "💰 **REAL-TIME USER PROFITS**\n*Which tokens users are profiting most on*\n━━━━━━━━━━━━━━\n"
+    for s in stats:
+        icon = "🟢" if s['net_profit'] >= 0 else "🔴"
+        sign = "+" if s['net_profit'] >= 0 else ""
+        msg += f"{icon} **{s['symbol']}**: {sign}₹{s['net_profit']:.2f} Profit\n"
+    
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 # --- USER COMMANDS (REFERRAL, STATS, GIFTS) ---
@@ -426,16 +456,3 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Invalid or already used Gift Code.")
     except IndexError:
         await update.message.reply_text("❌ Usage: `/redeem CODE`")
-
-async def token_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    stats = get_token_investment_stats()
-    
-    if not stats:
-        return await update.message.reply_text("📊 No investments made yet.")
-        
-    msg = "🏆 **TOKEN INVESTMENT LEADERBOARD**\n━━━━━━━━━━━━━━\n"
-    for s in stats:
-        msg += f"🔹 **{s['_id']}**: ₹{s['total_invested']:.2f}\n"
-    
-    await update.message.reply_text(msg, parse_mode="Markdown")
