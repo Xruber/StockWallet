@@ -12,7 +12,7 @@ from handlers_wallet import (
     ask_utr, receive_utr, start_withdraw, select_withdraw_method, ask_withdraw_details, 
     process_withdrawal, DEP_AMOUNT, DEP_METHOD, DEP_UTR, WD_AMOUNT, WD_METHOD, WD_DETAILS, TRADE_AMOUNT,
     token_rig_command, token_roi_list_command, daily_stats_command, gen_gift_command, 
-    redeem_command, token_stats_command, referral_command
+    redeem_command, token_stats_command, token_profits_command, referral_command
 )
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     
-    # --- NEW: EXTRACT REFERRAL ID IF IT EXISTS ---
     args = context.args
     referrer_id = None
     if args and len(args) > 0 and args[0].startswith("ref_"):
@@ -30,7 +29,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             pass
             
-    # Initialize user, trigger referral daily tracking, and assign inviter
     get_user_data(uid, referrer_id) 
     
     msg = (
@@ -63,7 +61,6 @@ async def back_home_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_command(update, context)
     return ConversationHandler.END
 
-# --- BACKGROUND MARKET JOB ---
 async def market_update_job(context: ContextTypes.DEFAULT_TYPE):
     update_market_prices()
     logger.info("📈 Background Job: Market prices updated using Mean-Reversion system.")
@@ -71,7 +68,6 @@ async def market_update_job(context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
-    # Run the market update every 300 seconds (5 mins)
     app.job_queue.run_repeating(market_update_job, interval=300, first=10)
     
     # Base Commands
@@ -80,7 +76,7 @@ def main():
     
     # User Feature Commands
     app.add_handler(CommandHandler("redeem", redeem_command))
-    app.add_handler(CommandHandler("invite", referral_command)) # Handles the referral link
+    app.add_handler(CommandHandler("invite", referral_command)) 
     app.add_handler(CommandHandler("referral", referral_command))
     app.add_handler(CommandHandler("daily_stats", daily_stats_command))
     app.add_handler(CommandHandler("token_roi_list", token_roi_list_command))
@@ -89,6 +85,7 @@ def main():
     app.add_handler(CommandHandler("token_rig", token_rig_command))
     app.add_handler(CommandHandler("gen_gift", gen_gift_command))
     app.add_handler(CommandHandler("token_stats", token_stats_command))
+    app.add_handler(CommandHandler("token_profits", token_profits_command)) # NEW PROFIT TRACKER!
     
     app.add_handler(CallbackQueryHandler(back_home_handler, pattern="^back_home$"))
     app.add_handler(CallbackQueryHandler(admin_payment_handler, pattern="^adm_(dep|wd)_"))
