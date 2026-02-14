@@ -77,7 +77,7 @@ def get_user_data(user_id, referrer_id=None):
         if referrer_id and referrer_id != user_id:
             users_collection.update_one(
                 {"user_id": referrer_id},
-                {"$inc": {"referral_count": 1, "wallet.balance": 50.0}} # Gives ₹50 per invite
+                {"$inc": {"referral_count": 1, "wallet.balance": 5.0}} # Gives ₹50 per invite
             )
             
     if "wallet" not in user:
