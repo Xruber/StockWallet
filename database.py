@@ -30,7 +30,7 @@ except Exception as e:
     logger.error(f"❌ Failed to connect to MongoDB: {e}")
 
 # ==========================================
-# 1. USER & STATS MANAGEMENT
+# 1. USER, STATS & REFERRAL MANAGEMENT
 # ==========================================
 def get_today_str():
     return date.today().isoformat()
@@ -55,20 +55,31 @@ def get_daily_stats():
     if not stat: return {"new_users": 0, "first_deposits": 0}
     return {"new_users": stat.get("new_users", 0), "first_deposits": stat.get("first_deposits", 0)}
 
-def get_user_data(user_id):
+def get_user_data(user_id, referrer_id=None):
     if users_collection is None: return {}
     
     user = users_collection.find_one({"user_id": user_id})
+    
+    # NEW USER CREATION + REFERRAL LOGIC
     if user is None:
         user = {
             "user_id": user_id,
             "is_banned": False,
             "has_deposited": False,
+            "referred_by": referrer_id,
+            "referral_count": 0,
             "wallet": {"balance": 0.0, "holdings": {}, "invested_amt": {}} 
         }
         users_collection.insert_one(user)
         record_new_user()
         
+        # Reward the referrer if one exists
+        if referrer_id and referrer_id != user_id:
+            users_collection.update_one(
+                {"user_id": referrer_id},
+                {"$inc": {"referral_count": 1, "wallet.balance": 50.0}} # Gives ₹50 per invite
+            )
+            
     if "wallet" not in user:
         user["wallet"] = {"balance": 0.0, "holdings": {}, "invested_amt": {}}
         users_collection.update_one({"user_id": user_id}, {"$set": {"wallet": user["wallet"]}})
@@ -76,24 +87,24 @@ def get_user_data(user_id):
     return user
 
 # ==========================================
-# 2. TOKEN & CHART SYSTEM (NEW MOMENTUM LOGIC)
+# 2. TOKEN & CHART SYSTEM (MEAN-REVERSION LOGIC)
 # ==========================================
 INITIAL_TOKENS = [
-    {"symbol": "TET", "name": "Texhet", "price": 10.0, "history": [10.0]},
-    {"symbol": "GLL", "name": "Gallium", "price": 5.5, "history": [5.5]},
-    {"symbol": "GGC", "name": "GigaCoin", "price": 100.0, "history": [100.0]},
-    {"symbol": "LKY", "name": "LOWKEY", "price": 0.5, "history": [0.5]},
-    {"symbol": "TSK", "name": "Tasket", "price": 12.0, "history": [12.0]},
-    {"symbol": "MKY", "name": "Milkyy", "price": 25.0, "history": [25.0]},
-    {"symbol": "HOA", "name": "Hainoka", "price": 8.0, "history": [8.0]},
-    {"symbol": "ZDR", "name": "Zendora", "price": 1.2, "history": [1.2]},
-    {"symbol": "FLX", "name": "Flux", "price": 45.0, "history": [45.0]},
-    {"symbol": "VRT", "name": "Vortex", "price": 150.0, "history": [150.0]},
-    {"symbol": "CRM", "name": "Crimson", "price": 7.0, "history": [7.0]},
-    {"symbol": "AER", "name": "Aether", "price": 90.0, "history": [90.0]},
-    {"symbol": "PLS", "name": "Pulse", "price": 3.3, "history": [3.3]},
-    {"symbol": "ION", "name": "Ion", "price": 18.0, "history": [18.0]},
-    {"symbol": "NVX", "name": "NovaX", "price": 60.0, "history": [60.0]}
+    {"symbol": "TET", "name": "Texhet", "price": 10.0, "base_price": 10.0, "history": [10.0]},
+    {"symbol": "GLL", "name": "Gallium", "price": 5.5, "base_price": 5.5, "history": [5.5]},
+    {"symbol": "GGC", "name": "GigaCoin", "price": 100.0, "base_price": 100.0, "history": [100.0]},
+    {"symbol": "LKY", "name": "LOWKEY", "price": 0.5, "base_price": 0.5, "history": [0.5]},
+    {"symbol": "TSK", "name": "Tasket", "price": 12.0, "base_price": 12.0, "history": [12.0]},
+    {"symbol": "MKY", "name": "Milkyy", "price": 25.0, "base_price": 25.0, "history": [25.0]},
+    {"symbol": "HOA", "name": "Hainoka", "price": 8.0, "base_price": 8.0, "history": [8.0]},
+    {"symbol": "ZDR", "name": "Zendora", "price": 1.2, "base_price": 1.2, "history": [1.2]},
+    {"symbol": "FLX", "name": "Flux", "price": 45.0, "base_price": 45.0, "history": [45.0]},
+    {"symbol": "VRT", "name": "Vortex", "price": 150.0, "base_price": 150.0, "history": [150.0]},
+    {"symbol": "CRM", "name": "Crimson", "price": 7.0, "base_price": 7.0, "history": [7.0]},
+    {"symbol": "AER", "name": "Aether", "price": 90.0, "base_price": 90.0, "history": [90.0]},
+    {"symbol": "PLS", "name": "Pulse", "price": 3.3, "base_price": 3.3, "history": [3.3]},
+    {"symbol": "ION", "name": "Ion", "price": 18.0, "base_price": 18.0, "history": [18.0]},
+    {"symbol": "NVX", "name": "NovaX", "price": 60.0, "base_price": 60.0, "history": [60.0]}
 ]
 
 def init_tokens():
@@ -102,37 +113,47 @@ def init_tokens():
 
 def get_all_tokens():
     if tokens_collection is None: return []
-    # No more random updates here. This just fetches the current state.
     return list(tokens_collection.find({}, {"_id": 0}))
 
 def update_market_prices():
-    """ Runs every 5 mins to update prices using Trend & Volatility momentum """
+    """ Runs every 5 mins. Uses Mean-Reversion to prevent 1000x mooning or crashing to zero. """
     if tokens_collection is None: return
     tokens = list(tokens_collection.find({}))
     
     for t in tokens:
-        # Initialize trend/volatility if they don't exist
-        trend = t.get('trend', random.uniform(-0.02, 0.02))
-        volatility = t.get('volatility', random.uniform(0.01, 0.05))
+        current_price = t['price']
+        base_price = t.get('base_price', current_price) # The anchor price
         
-        # Calculate price change based on trend + random noise from volatility
-        change_percent = trend + random.uniform(-volatility, volatility)
+        # Calculate how far we are from the base price
+        deviation = (current_price - base_price) / base_price
         
-        # Cap the max movement per 5 mins to 12% to prevent instant crashes
-        change_percent = max(-0.12, min(0.12, change_percent))
+        # If deviation is high, the "rubber band" snaps back (mean reversion)
+        reversion_force = -deviation * 0.04 
         
-        new_price = round(t['price'] * (1 + change_percent), 2)
-        if new_price <= 0.01: new_price = 0.01 # Prevent zero/negative
+        # Random market noise (max 1.5% fluctuation per 5 mins)
+        noise = random.uniform(-0.015, 0.015)
         
-        # Evolve the trend slightly so it's not a permanent moon/crash
-        new_trend = trend + random.uniform(-0.015, 0.015)
-        new_trend = max(-0.05, min(0.05, new_trend)) # Keep trend bounded
+        change_percent = reversion_force + noise
         
+        # Cap maximum movement per 5 mins to 3% to keep it smooth
+        change_percent = max(-0.03, min(0.03, change_percent))
+        
+        new_price = round(current_price * (1 + change_percent), 2)
+        
+        # Absolute Hard Limits (Price can never go 10x higher or 90% lower than base)
+        if new_price > base_price * 10: new_price = round(base_price * 10, 2)
+        if new_price < base_price * 0.1: new_price = round(base_price * 0.1, 2)
+        if new_price <= 0.01: new_price = 0.01 
+        
+        update_data = {"price": new_price}
+        if 'base_price' not in t: 
+            update_data['base_price'] = t['price']
+            
         tokens_collection.update_one(
             {"symbol": t['symbol']}, 
             {
-                "$set": {"price": new_price, "trend": new_trend, "volatility": volatility},
-                "$push": {"history": {"$each": [new_price], "$slice": -20}}
+                "$set": update_data,
+                "$push": {"history": {"$each": [new_price], "$slice": -30}}
             }
         )
 
@@ -142,7 +163,39 @@ def get_token_details(symbol):
 
 def update_token_price(symbol, new_price):
     if tokens_collection is not None:
-        tokens_collection.update_one({"symbol": symbol}, {"$set": {"price": float(new_price)}, "$push": {"history": float(new_price)}})
+        t = tokens_collection.find_one({"symbol": symbol})
+        if t:
+            # When admin rigs price, update base_price too so it anchors to the new rig
+            tokens_collection.update_one(
+                {"symbol": symbol}, 
+                {"$set": {"price": float(new_price), "base_price": float(new_price)}, "$push": {"history": float(new_price)}}
+            )
+
+def get_token_roi_list():
+    """ Calculates % growth of all tokens since inception """
+    if tokens_collection is None: return []
+    tokens = list(tokens_collection.find({}))
+    roi_data = []
+    
+    for t in tokens:
+        current = t['price']
+        base = t.get('base_price', current)
+        
+        if base > 0:
+            growth_pct = ((current - base) / base) * 100
+        else:
+            growth_pct = 0.0
+            
+        roi_data.append({
+            "symbol": t['symbol'],
+            "name": t['name'],
+            "current_price": current,
+            "roi_percent": growth_pct
+        })
+        
+    # Sort highest growth first
+    roi_data.sort(key=lambda x: x['roi_percent'], reverse=True)
+    return roi_data
 
 # ==========================================
 # 3. WALLET FUNCTIONS
@@ -191,7 +244,6 @@ def update_transaction_status(tx_id, status):
     transactions_collection.update_one({"tx_id": tx_id}, {"$set": {"status": status}})
 
 def get_token_investment_stats():
-    """ Aggregates total money invested into each token across all users """
     if users_collection is None: return []
     pipeline = [
         {"$project": {"invested_amt": "$wallet.invested_amt"}},
