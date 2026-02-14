@@ -60,7 +60,6 @@ def get_user_data(user_id, referrer_id=None):
     
     user = users_collection.find_one({"user_id": user_id})
     
-    # NEW USER CREATION + REFERRAL LOGIC
     if user is None:
         user = {
             "user_id": user_id,
@@ -68,20 +67,19 @@ def get_user_data(user_id, referrer_id=None):
             "has_deposited": False,
             "referred_by": referrer_id,
             "referral_count": 0,
-            "wallet": {"balance": 0.0, "holdings": {}, "invested_amt": {}} 
+            "wallet": {"balance": 0.0, "holdings": {}, "invested_amt": {}, "earned_amt": {}} 
         }
         users_collection.insert_one(user)
         record_new_user()
         
-        # Reward the referrer if one exists
         if referrer_id and referrer_id != user_id:
             users_collection.update_one(
                 {"user_id": referrer_id},
-                {"$inc": {"referral_count": 1, "wallet.balance": 5.0}} # Gives ₹50 per invite
+                {"$inc": {"referral_count": 1, "wallet.balance": 50.0}}
             )
             
     if "wallet" not in user:
-        user["wallet"] = {"balance": 0.0, "holdings": {}, "invested_amt": {}}
+        user["wallet"] = {"balance": 0.0, "holdings": {}, "invested_amt": {}, "earned_amt": {}}
         users_collection.update_one({"user_id": user_id}, {"$set": {"wallet": user["wallet"]}})
         
     return user
@@ -116,31 +114,21 @@ def get_all_tokens():
     return list(tokens_collection.find({}, {"_id": 0}))
 
 def update_market_prices():
-    """ Runs every 5 mins. Uses Mean-Reversion to prevent 1000x mooning or crashing to zero. """
     if tokens_collection is None: return
     tokens = list(tokens_collection.find({}))
     
     for t in tokens:
         current_price = t['price']
-        base_price = t.get('base_price', current_price) # The anchor price
-        
-        # Calculate how far we are from the base price
+        base_price = t.get('base_price', current_price) 
         deviation = (current_price - base_price) / base_price
-        
-        # If deviation is high, the "rubber band" snaps back (mean reversion)
         reversion_force = -deviation * 0.04 
-        
-        # Random market noise (max 1.5% fluctuation per 5 mins)
         noise = random.uniform(-0.015, 0.015)
         
         change_percent = reversion_force + noise
-        
-        # Cap maximum movement per 5 mins to 3% to keep it smooth
         change_percent = max(-0.03, min(0.03, change_percent))
         
         new_price = round(current_price * (1 + change_percent), 2)
         
-        # Absolute Hard Limits (Price can never go 10x higher or 90% lower than base)
         if new_price > base_price * 10: new_price = round(base_price * 10, 2)
         if new_price < base_price * 0.1: new_price = round(base_price * 0.1, 2)
         if new_price <= 0.01: new_price = 0.01 
@@ -165,14 +153,12 @@ def update_token_price(symbol, new_price):
     if tokens_collection is not None:
         t = tokens_collection.find_one({"symbol": symbol})
         if t:
-            # When admin rigs price, update base_price too so it anchors to the new rig
             tokens_collection.update_one(
                 {"symbol": symbol}, 
                 {"$set": {"price": float(new_price), "base_price": float(new_price)}, "$push": {"history": float(new_price)}}
             )
 
 def get_token_roi_list():
-    """ Calculates % growth of all tokens since inception """
     if tokens_collection is None: return []
     tokens = list(tokens_collection.find({}))
     roi_data = []
@@ -193,7 +179,6 @@ def get_token_roi_list():
             "roi_percent": growth_pct
         })
         
-    # Sort highest growth first
     roi_data.sort(key=lambda x: x['roi_percent'], reverse=True)
     return roi_data
 
@@ -202,7 +187,7 @@ def get_token_roi_list():
 # ==========================================
 def get_user_wallet(user_id):
     u = get_user_data(user_id)
-    return u.get("wallet", {"balance": 0.0, "holdings": {}, "invested_amt": {}})
+    return u.get("wallet", {"balance": 0.0, "holdings": {}, "invested_amt": {}, "earned_amt": {}})
 
 def update_wallet_balance(user_id, amount):
     if users_collection is not None:
@@ -220,7 +205,7 @@ def trade_token(user_id, symbol, quantity, price, is_buy=True):
     else:
         users_collection.update_one(
             {"user_id": user_id},
-            {"$inc": {"wallet.balance": cost, f"wallet.holdings.{symbol}": -quantity}}
+            {"$inc": {"wallet.balance": cost, f"wallet.holdings.{symbol}": -quantity, f"wallet.earned_amt.{symbol}": cost}}
         )
 
 # ==========================================
@@ -243,16 +228,69 @@ def get_transaction(tx_id):
 def update_transaction_status(tx_id, status):
     transactions_collection.update_one({"tx_id": tx_id}, {"$set": {"status": status}})
 
-def get_token_investment_stats():
-    if users_collection is None: return []
+def get_current_token_stats():
+    """ Calculates current total value of tokens held by all users at THIS exact moment """
+    if users_collection is None or tokens_collection is None: return []
+    
+    tokens = {t['symbol']: t['price'] for t in tokens_collection.find({})}
+    
     pipeline = [
-        {"$project": {"invested_amt": "$wallet.invested_amt"}},
-        {"$addFields": {"invested_array": {"$objectToArray": "$invested_amt"}}},
-        {"$unwind": "$invested_array"},
-        {"$group": {"_id": "$invested_array.k", "total_invested": {"$sum": "$invested_array.v"}}},
-        {"$sort": {"total_invested": -1}}
+        {"$project": {"arr": {"$objectToArray": {"$ifNull": ["$wallet.holdings", {}]}}}},
+        {"$unwind": "$arr"},
+        {"$group": {"_id": "$arr.k", "total_held": {"$sum": "$arr.v"}}}
     ]
-    return list(users_collection.aggregate(pipeline))
+    
+    holdings_data = list(users_collection.aggregate(pipeline))
+    
+    stats = []
+    for h in holdings_data:
+        sym = h['_id']
+        qty = h['total_held']
+        price = tokens.get(sym, 0)
+        current_value = qty * price
+        
+        if current_value > 0:
+            stats.append({"symbol": sym, "current_value": current_value, "total_held": qty})
+            
+    stats.sort(key=lambda x: x['current_value'], reverse=True)
+    return stats
+
+def get_platform_profit_by_token():
+    """ Calculates exact real-time net profit users are making per token """
+    if users_collection is None or tokens_collection is None: return []
+    
+    tokens = {t['symbol']: t['price'] for t in tokens_collection.find({})}
+    
+    def get_sum(field_path):
+        pipe = [
+            {"$project": {"arr": {"$objectToArray": {"$ifNull": [field_path, {}]}}}},
+            {"$unwind": "$arr"},
+            {"$group": {"_id": "$arr.k", "total": {"$sum": "$arr.v"}}}
+        ]
+        return {doc['_id']: doc['total'] for doc in users_collection.aggregate(pipe)}
+        
+    holdings = get_sum("$wallet.holdings")
+    invested = get_sum("$wallet.invested_amt")
+    earned = get_sum("$wallet.earned_amt")
+    
+    stats = []
+    for sym, current_price in tokens.items():
+        qty = holdings.get(sym, 0)
+        inv = invested.get(sym, 0)
+        ern = earned.get(sym, 0)
+        
+        current_value = qty * current_price
+        net_profit = (current_value + ern) - inv
+        
+        if inv > 0 or qty > 0:
+            stats.append({
+                "symbol": sym,
+                "net_profit": net_profit,
+                "current_value": current_value
+            })
+        
+    stats.sort(key=lambda x: x['net_profit'], reverse=True)
+    return stats
 
 # ==========================================
 # 5. GIFT CODE SYSTEM
