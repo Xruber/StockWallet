@@ -11,7 +11,8 @@ from handlers_wallet import (
     admin_payment_handler, start_deposit, select_deposit_amount, show_qr_code, 
     ask_utr, receive_utr, start_withdraw, select_withdraw_method, ask_withdraw_details, 
     process_withdrawal, DEP_AMOUNT, DEP_METHOD, DEP_UTR, WD_AMOUNT, WD_METHOD, WD_DETAILS, TRADE_AMOUNT,
-    token_rig_command, token_roi_list_command, daily_stats_command, gen_gift_command, redeem_command, token_stats_command
+    token_rig_command, token_roi_list_command, daily_stats_command, gen_gift_command, 
+    redeem_command, token_stats_command, referral_command
 )
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -19,7 +20,18 @@ logger = logging.getLogger(__name__)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    get_user_data(uid) # Initialize user & triggers referral daily tracking
+    
+    # --- NEW: EXTRACT REFERRAL ID IF IT EXISTS ---
+    args = context.args
+    referrer_id = None
+    if args and len(args) > 0 and args[0].startswith("ref_"):
+        try:
+            referrer_id = int(args[0].split("_")[1])
+        except ValueError:
+            pass
+            
+    # Initialize user, trigger referral daily tracking, and assign inviter
+    get_user_data(uid, referrer_id) 
     
     msg = (
         f"🏦 **CRYPTO EXCHANGE BOT**\n"
@@ -28,6 +40,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 ID: `{uid}`\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"Manage your portfolio, deposit funds, and trade tokens.\n"
+        f"🤝 Type `/invite` to get your referral link!\n"
         f"🎁 Got a code? Use `/redeem CODE`"
     )
     
@@ -50,11 +63,10 @@ async def back_home_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start_command(update, context)
     return ConversationHandler.END
 
-# --- NEW: MARKET BACKGROUND JOB ---
+# --- BACKGROUND MARKET JOB ---
 async def market_update_job(context: ContextTypes.DEFAULT_TYPE):
-    """ Fired automatically every 5 minutes by the Job Queue """
     update_market_prices()
-    logger.info("📈 Background Job: Market prices updated using momentum/trend system.")
+    logger.info("📈 Background Job: Market prices updated using Mean-Reversion system.")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -68,11 +80,13 @@ def main():
     
     # User Feature Commands
     app.add_handler(CommandHandler("redeem", redeem_command))
+    app.add_handler(CommandHandler("invite", referral_command)) # Handles the referral link
+    app.add_handler(CommandHandler("referral", referral_command))
+    app.add_handler(CommandHandler("daily_stats", daily_stats_command))
+    app.add_handler(CommandHandler("token_roi_list", token_roi_list_command))
     
     # Admin Commands
     app.add_handler(CommandHandler("token_rig", token_rig_command))
-    app.add_handler(CommandHandler("token_roi_list", token_roi_list_command))
-    app.add_handler(CommandHandler("daily_stats", daily_stats_command))
     app.add_handler(CommandHandler("gen_gift", gen_gift_command))
     app.add_handler(CommandHandler("token_stats", token_stats_command))
     
@@ -130,6 +144,5 @@ if __name__ == "__main__":
         print(error_msg)
         print("\n================================================")
         
-        # Save to file just in case console cuts it off
         with open("crash_log.txt", "w") as f:
             f.write(error_msg)
