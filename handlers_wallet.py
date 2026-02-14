@@ -8,7 +8,7 @@ from database import (
     update_transaction_status, get_transaction, get_user_data,
     update_token_price, users_collection, get_token_details,
     record_first_deposit, get_daily_stats, generate_gift_code, 
-    redeem_gift_code, get_token_investment_stats
+    redeem_gift_code, get_token_investment_stats, get_token_roi_list
 )
 from config import ADMIN_ID, PAYMENT_IMAGE_URL
 
@@ -331,7 +331,7 @@ async def admin_payment_handler(update: Update, context: ContextTypes.DEFAULT_TY
         if decision == "ok":
             update_wallet_balance(uid, amt)
             update_transaction_status(tx_id, "completed")
-            record_first_deposit(uid) # <--- Tracks daily first deposits!
+            record_first_deposit(uid) 
             await context.bot.send_message(uid, f"✅ Deposit ₹{amt} Approved")
         else:
             update_transaction_status(tx_id, "rejected")
@@ -350,17 +350,48 @@ async def token_rig_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     try:
         update_token_price(context.args[0].upper(), float(context.args[1]))
-        await update.message.reply_text(f"✅ Rigged.")
+        await update.message.reply_text(f"✅ Rigged. Price anchored.")
     except: await update.message.reply_text("❌ Usage: `/token_rig SYM PRICE`")
 
+# --- NOW FULLY WORKING ROI COMMAND ---
 async def token_roi_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    await update.message.reply_text("🏆 **ROI List generated in console.**")
+    roi_data = get_token_roi_list()
+    if not roi_data:
+        return await update.message.reply_text("❌ Error loading market data.")
+        
+    msg = "📈 **TOKEN ROI PERFORMANCE**\n━━━━━━━━━━━━━━\n"
+    for item in roi_data:
+        symbol = item['symbol']
+        pct = item['roi_percent']
+        price = item['current_price']
+        
+        icon = "🚀" if pct > 0 else "🔻" if pct < 0 else "➖"
+        sign = "+" if pct > 0 else ""
+        
+        msg += f"{icon} **{symbol}**: {sign}{pct:.2f}% (₹{price})\n"
+        
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
-# --- NEW COMMANDS FOR GIFT CODES & STATS ---
+# --- USER COMMANDS (REFERRAL, STATS, GIFTS) ---
+
+async def referral_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user_data = get_user_data(uid)
+    bot_username = context.bot.username
+    
+    ref_link = f"https://t.me/{bot_username}?start=ref_{uid}"
+    ref_count = user_data.get("referral_count", 0)
+    
+    msg = (
+        f"🤝 **INVITE & EARN**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Share your link to invite friends. You will receive **₹50** instantly for every successful new signup!\n\n"
+        f"🔗 **Your Referral Link:**\n`{ref_link}`\n\n"
+        f"👥 **Your Referrals:** {ref_count}"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def daily_stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Removed the admin check so all users can use this command
     stats = get_daily_stats()
     msg = (
         f"📊 **DAILY STATS (Today)**\n"
@@ -385,7 +416,7 @@ async def gen_gift_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    get_user_data(uid) # Ensure registered
+    get_user_data(uid) 
     try:
         code = context.args[0]
         success, amount = redeem_gift_code(uid, code)
