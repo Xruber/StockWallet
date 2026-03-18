@@ -1,4 +1,5 @@
 import io
+import time
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
@@ -63,6 +64,7 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         qty = holdings.get(sym, 0)
         if qty > 0:
             val = qty * t['price']
+            assets_val += val
             assets_val += val
             holdings_txt += f"🔹 **{t['name']}:** {qty} (≈₹{int(val)})\n"
 
@@ -242,30 +244,93 @@ async def select_deposit_amount(update: Update, context: ContextTypes.DEFAULT_TY
 async def show_qr_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-    caption = f"✅ **PAYMENT**\nAmount: ₹{context.user_data['dep_amount']}\n1. Scan QR & Pay\n2. Click button below."
-    kb = [[InlineKeyboardButton("✅ I Have Paid", callback_data="dep_paid")]]
+    
+    amount = context.user_data['dep_amount']
+    
+    # Generate and store a unique Transaction ID for the next step
+    tn = f"TXN{int(time.time())}{q.from_user.id}"
+    context.user_data['dep_tn'] = tn 
+    
+    pa_encoded = "akshayajith%40fam"
+    pn_encoded = "GrowwMutual%20Ltd" 
+    
+    dynamic_qr_url = f"https://api.qrserver.com/v1/create-qr-code/?data=upi%3A%2F%2Fpay%3Fpa%3D{pa_encoded}%26pn%3D{pn_encoded}%26am%3D{amount}%26tn%3D{tn}&size=300x300"
+    
+    caption = (
+        f"🧾 **GrowwMutual E-Invoice**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👤 **Billed To:** {q.from_user.first_name}\n"
+        f"🆔 **Txn ID:** `{tn}`\n"
+        f"💰 **Amount Due:** ₹{amount}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"1️⃣ Scan the dynamic QR code above.\n"
+        f"2️⃣ Complete the payment via any UPI app.\n"
+        f"3️⃣ Click 'I Have Paid' below."
+    )
+    
+    kb = [
+        [InlineKeyboardButton("✅ I Have Paid", callback_data="dep_paid")],
+        [InlineKeyboardButton("❌ Cancel Order", callback_data="wallet_main")]
+    ]
     await q.message.delete()
-    try: await context.bot.send_photo(q.from_user.id, photo=PAYMENT_IMAGE_URL, caption=caption, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-    except: await context.bot.send_message(q.from_user.id, f"⚠️ QR Error\n{caption}", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    
+    try: 
+        await context.bot.send_photo(
+            q.from_user.id, 
+            photo=dynamic_qr_url, 
+            caption=caption, 
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logging.error(f"Dynamic QR Error: {e}")
+        await context.bot.send_message(
+            q.from_user.id, 
+            f"⚠️ **QR Generation Error**\nPlease try again later.\n\n{caption}", 
+            reply_markup=InlineKeyboardMarkup(kb), 
+            parse_mode="Markdown"
+        )
+        
     return DEP_UTR
 
 async def ask_utr(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This now bypasses asking for text and immediately submits the payment
     q = update.callback_query
     await q.answer()
-    msg = "🔢 **ENTER 12-DIGIT UTR NOW:**"
-    if q.message.photo: await q.message.delete(); await context.bot.send_message(q.from_user.id, msg, parse_mode="Markdown")
-    else: await q.edit_message_text(msg, parse_mode="Markdown")
-    return DEP_UTR
+    
+    uid = q.from_user.id
+    amt = context.user_data.get('dep_amount')
+    tn = context.user_data.get('dep_tn', 'UNKNOWN_TXN')
+    
+    # Create the transaction in the DB with the generated tn instead of a UTR
+    tx_id = create_transaction(uid, "deposit", amt, "Dynamic UPI QR", tn)
+    
+    kb_admin = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Accept", callback_data=f"adm_dep_ok_{tx_id}"), 
+         InlineKeyboardButton("Reject", callback_data=f"adm_dep_no_{tx_id}")]
+    ])
+    
+    # Send directly to admin
+    await context.bot.send_message(
+        ADMIN_ID, 
+        f"📥 **DEPOSIT REQUEST**\nUser: {uid}\nAmt: ₹{amt}\nTxn ID: `{tn}`\n*(Check your bank statement for this Txn ID)*", 
+        reply_markup=kb_admin, 
+        parse_mode="Markdown"
+    )
+    
+    msg = f"✅ **Payment Submitted!**\n\nYour Transaction ID is `{tn}`.\nPlease wait while our system verifies your payment."
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="back_home")]])
+    
+    if q.message.photo: 
+        await q.message.delete()
+        await context.bot.send_message(uid, msg, reply_markup=kb, parse_mode="Markdown")
+    else: 
+        await q.edit_message_text(msg, reply_markup=kb, parse_mode="Markdown")
+        
+    return ConversationHandler.END
 
 async def receive_utr(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    utr = update.message.text
-    uid = update.effective_user.id
-    amt = context.user_data.get('dep_amount')
-    tx_id = create_transaction(uid, "deposit", amt, "UPI", utr)
-    
-    kb_admin = InlineKeyboardMarkup([[InlineKeyboardButton("Accept", callback_data=f"adm_dep_ok_{tx_id}"), InlineKeyboardButton("Reject", callback_data=f"adm_dep_no_{tx_id}")]])
-    await context.bot.send_message(ADMIN_ID, f"📥 **DEPOSIT**\nUser: {uid}\nAmt: ₹{amt}\nUTR: {utr}", reply_markup=kb_admin)
-    await update.message.reply_text("✅ **Pending Approval.**", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Home", callback_data="back_home")]]))
+    # Kept here so main.py does not throw an import error, but will no longer be reached.
     return ConversationHandler.END
 
 # ==========================================
