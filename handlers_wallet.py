@@ -251,7 +251,7 @@ async def show_qr_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tn = f"TXN{int(time.time())}{q.from_user.id}"
     context.user_data['dep_tn'] = tn 
     
-    pa_encoded = "akshayajith%40fam"
+    pa_encoded = "paniyamma9%40ptyes"
     pn_encoded = "GrowwMutual%20Ltd" 
     
     dynamic_qr_url = f"https://api.qrserver.com/v1/create-qr-code/?data=upi%3A%2F%2Fpay%3Fpa%3D{pa_encoded}%26pn%3D{pn_encoded}%26am%3D{amount}%26tn%3D{tn}&size=300x300"
